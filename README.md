@@ -360,7 +360,7 @@ while true; do curl -s -o /dev/null -w "%{http_code} %{time_total}\n" http://loc
 
 | | |
 |---|---|
-| ![Prometheus Targets](docs/screenshots/06-prometheus-targets.png)<br>**06.** Prometheus → Targets: все UP | ![Prometheus Alerts](docs/screenshots/07-prometheus-alerts.png)<br>**07.** Prometheus → Alerts: только Watchdog |
+| ![Prometheus Targets](docs/screenshots/06-prometheus-targets.png)<br>**06.** Prometheus → Targets: все UP | ![Prometheus Alerts](docs/screenshots/07-prometheus-alerts.png)<br>**07.** Prometheus → Alerts |
 
 #### Дашборды Grafana
 
