@@ -1,0 +1,107 @@
+groups:
+  # ---------------------------------------------------------------- хосты
+  - name: node
+    rules:
+      - alert: InstanceDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "ВМ {{ $labels.instance }} недоступна"
+          description: "node_exporter не отвечает больше минуты."
+
+      - alert: TargetDown
+        expr: up{job!~"node|blackbox_http"} == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Цель {{ $labels.job }} на {{ $labels.instance }} не отвечает"
+          description: "Prometheus не может снять метрики {{ $labels.job }} уже 2 минуты."
+
+      - alert: HostHighCpu
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU {{ $labels.instance }} > 85%"
+          description: "Загрузка CPU {{ printf \"%.0f\" $value }}% в течение 10 минут."
+
+      - alert: HostLowMemory
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100 < 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Мало памяти на {{ $labels.instance }}"
+          description: "Доступно {{ printf \"%.1f\" $value }}% RAM."
+
+      - alert: HostDiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) * 100 < 15
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Мало места: {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "Свободно {{ printf \"%.1f\" $value }}%."
+
+      - alert: HostDiskSpaceCritical
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}) * 100 < 5
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Диск почти заполнен: {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "Свободно {{ printf \"%.1f\" $value }}%. PostgreSQL остановится при 0%."
+
+      - alert: HostDiskWillFillIn24h
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[6h], 24 * 3600) < 0
+          and on (instance, mountpoint)
+          node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"} < 0.4
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "Диск {{ $labels.instance }} {{ $labels.mountpoint }} заполнится в течение суток"
+          description: "Прогноз по тренду за 6 часов."
+
+      - alert: HostClockNotSynced
+        expr: node_timex_sync_status == 0 or abs(node_timex_offset_seconds) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Время на {{ $labels.instance }} не синхронизировано"
+          description: "Расхождение часов ломает Raft (Consul), TTL лидера Patroni и корреляцию логов."
+
+  # ------------------------------------------------------- self-monitoring
+  - name: meta
+    rules:
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: none }
+        annotations:
+          summary: "Цепочка алертинга работает"
+          description: "Этот алерт горит всегда. Если он пропал — сломан Prometheus или Alertmanager."
+
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Ошибки вычисления правил Prometheus"
+          description: "Группа {{ $labels.rule_group }}: правила не вычисляются — алерты могут не сработать."
+
+      - alert: AlertmanagerNotificationsFailing
+        expr: sum by (integration) (rate(alertmanager_notifications_failed_total[5m])) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Alertmanager не может доставить уведомления в {{ $labels.integration }}"
+          description: "Проверьте токен/SMTP/URL: docker compose logs alertmanager --tail 50"
+
+      - alert: PrometheusNotificationsFailing
+        expr: rate(prometheus_notifications_errors_total[5m]) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Prometheus не может отправить алерты в Alertmanager"
+          description: "Проверьте контейнер alertmanager на mon1."

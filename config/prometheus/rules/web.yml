@@ -1,0 +1,60 @@
+groups:
+  # ------------------------------------------------ SLI: сайт глазами пользователя
+  - name: sli_recording
+    rules:
+      - record: sli:probe_success:avg5m
+        expr: avg by (instance) (avg_over_time(probe_success{job="blackbox_http"}[5m]))
+      - record: sli:availability:ratio_30d
+        expr: avg_over_time(probe_success{job="blackbox_http", instance=~".*/"}[30d])
+
+  - name: web
+    rules:
+      - alert: SiteDown
+        expr: probe_success{job="blackbox_http"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Сайт недоступен: {{ $labels.instance }}"
+          description: "Внешняя проверка не проходит больше минуты. Смотрите дашборд SRE / Platform Overview."
+
+      - alert: SiteSlow
+        expr: probe_duration_seconds{job="blackbox_http"} > 2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Сайт отвечает дольше 2 с: {{ $labels.instance }}"
+          description: "Время ответа {{ printf \"%.2f\" $value }} с."
+
+      # SLO 99.5% за 30 дней.
+      - alert: SLOErrorBudgetBurnFast
+        expr: |
+          (1 - avg_over_time(probe_success{job="blackbox_http", instance=~".*/"}[1h])) > (14.4 * 0.005)
+          and
+          (1 - avg_over_time(probe_success{job="blackbox_http", instance=~".*/"}[5m])) > (14.4 * 0.005)
+        labels: { severity: critical }
+        annotations:
+          summary: "Бюджет ошибок SLO сгорает слишком быстро"
+          description: "При таком темпе месячный бюджет (0.5%) закончится за ~2 суток."
+
+      - alert: NginxDown
+        expr: nginx_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "nginx на {{ $labels.instance }} не отвечает на stub_status"
+          description: "systemctl status nginx"
+
+      - alert: PhpFpmMaxChildrenReached
+        expr: increase(phpfpm_max_children_reached[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "php-fpm упёрся в pm.max_children на {{ $labels.instance }}"
+          description: "Запросы встают в очередь. Увеличьте pm.max_children (если хватает RAM) или ищите медленные запросы в slowlog."
+
+      - alert: PhpFpmListenQueue
+        expr: phpfpm_listen_queue > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Очередь запросов php-fpm на {{ $labels.instance }}"
+          description: "В очереди {{ $value }} запросов."

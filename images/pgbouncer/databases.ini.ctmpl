@@ -1,0 +1,10 @@
+;; Сгенерировано consul-template — НЕ редактировать вручную.
+;; Источник: здоровый экземпляр сервиса pg-cluster с тегом лидера.
+;; Patroni 3.x+ ставит тег "primary", старые версии — "master": поддерживаем оба.
+[databases]
+{{- $leader := service "primary.pg-cluster" }}
+{{- if not $leader }}{{ $leader = service "master.pg-cluster" }}{{ end }}
+{{- range $leader }}
+wordpress = host={{ .Address }} port={{ .Port }} dbname=wordpress
+;; leader: {{ .Node }}
+{{- end }}

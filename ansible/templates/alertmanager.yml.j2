@@ -1,0 +1,78 @@
+# {{ ansible_managed }}
+# Каналы включаются, только если для них заданы переменные (ansible/group_vars/docker_hosts/).
+global:
+  resolve_timeout: 5m
+{% if alert_email_to %}
+  smtp_smarthost: "{{ alert_smtp_smarthost }}"
+  smtp_from: "{{ alert_smtp_from }}"
+  smtp_auth_username: "{{ alert_smtp_username }}"
+  smtp_auth_password: "{{ alert_smtp_password }}"
+  smtp_require_tls: {{ alert_smtp_require_tls | bool | lower }}
+{% endif %}
+
+# Шаблоны сообщений: config/alertmanager/templates/notify.tmpl
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  receiver: warning
+  group_by: [alertname, instance]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Watchdog горит всегда — признак того, что цепочка алертинга жива. Не рассылаем.
+    - receiver: "null"
+      matchers: ['alertname = "Watchdog"']
+    # critical — во все каналы и чаще напоминаем
+    - receiver: critical
+      matchers: ['severity = "critical"']
+      repeat_interval: 1h
+
+inhibit_rules:
+  # Если упал узел целиком — не засыпаем остальными алертами по нему
+  - source_matchers: ['alertname = "InstanceDown"', 'job = "node"']
+    target_matchers: ['alertname != "InstanceDown"']
+    equal: [instance]
+  # critical глушит warning по тому же объекту
+  - source_matchers: ['severity = "critical"']
+    target_matchers: ['severity = "warning"']
+    equal: [alertname, instance]
+
+{% macro telegram() %}
+{% if alert_telegram_bot_token and alert_telegram_chat_id %}
+    telegram_configs:
+      - bot_token: "{{ alert_telegram_bot_token }}"
+        chat_id: {{ alert_telegram_chat_id | int }}
+        parse_mode: HTML
+        send_resolved: true
+        message: '{% raw %}{{ template "telegram.message" . }}{% endraw %}'
+{% endif %}
+{% endmacro %}
+{% macro email() %}
+{% if alert_email_to %}
+    email_configs:
+      - to: "{{ alert_email_to }}"
+        send_resolved: true
+        headers:
+          Subject: '{% raw %}{{ template "email.subject" . }}{% endraw %}'
+        html: '{% raw %}{{ template "email.html" . }}{% endraw %}'
+{% endif %}
+{% endmacro %}
+{% macro webhook() %}
+{% if alert_webhook_url %}
+    webhook_configs:
+      - url: "{{ alert_webhook_url }}"
+        send_resolved: true
+        max_alerts: 0
+{% endif %}
+{% endmacro %}
+receivers:
+  - name: "null"
+
+  # critical: Telegram + почта + webhook
+  - name: critical
+{{ telegram() }}{{ email() }}{{ webhook() }}
+  # warning: Telegram + webhook (почту не засоряем)
+  - name: warning
+{{ telegram() }}{{ webhook() }}

@@ -1,0 +1,83 @@
+# Общий конфиг для pg1..pg3. Отличия узлов и пароли приходят из переменных окружения:
+#   PATRONI_NAME, PATRONI_RESTAPI_CONNECT_ADDRESS, PATRONI_POSTGRESQL_CONNECT_ADDRESS,
+#   PATRONI_CONSUL_HOST, PATRONI_SUPERUSER_PASSWORD, PATRONI_REPLICATION_PASSWORD, ...
+scope: pg-cluster
+namespace: /service/
+
+log:
+  level: INFO
+
+restapi:
+  listen: 0.0.0.0:8008
+
+# DCS — «свой» сервер Consul. register_service: Patroni регистрирует сервис pg-cluster
+# с тегом роли (primary/replica) — по нему consul-template находит лидера.
+consul:
+  register_service: true
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576   # реплика, отставшая > 1 МБ WAL, не станет лидером
+    postgresql:
+      use_pg_rewind: true
+      use_slots: true
+      parameters:
+        max_connections: 200
+        shared_buffers: 128MB
+        work_mem: 4MB
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_log_hints: "on"
+        wal_keep_size: 256MB
+        password_encryption: scram-sha-256
+        shared_preload_libraries: pg_stat_statements
+        track_io_timing: "on"
+        # Логи — в stderr контейнера (их забирает Alloy через Docker API)
+        logging_collector: "off"
+        log_destination: stderr
+        log_line_prefix: "%m [%p] %q%u@%d "
+        log_min_duration_statement: 500
+        log_checkpoints: "on"
+        log_lock_waits: "on"
+        log_connections: "off"
+  initdb:
+    - encoding: UTF8
+    - locale: C.UTF-8
+    - data-checksums
+  # После initdb на первом лидере: пользователи, БД wordpress, экспортёр
+  post_bootstrap: /usr/local/bin/post_bootstrap.sh
+
+postgresql:
+  listen: 0.0.0.0:5432
+  data_dir: /var/lib/postgresql/data/pg15
+  bin_dir: /usr/lib/postgresql/15/bin
+  pgpass: /tmp/pgpass
+  authentication:
+    superuser:
+      username: postgres
+    replication:
+      username: replicator
+    rewind:
+      username: rewind_user
+  parameters:
+    unix_socket_directories: /var/run/postgresql
+  # 172.28.0.0/16 — подсеть docker-сети стенда (задана в docker-compose.yml)
+  pg_hba:
+    - local   all          all                          trust
+    - host    all          all          127.0.0.1/32    scram-sha-256
+    - host    replication  replicator   172.28.0.0/16   scram-sha-256
+    - host    all          all          172.28.0.0/16   scram-sha-256
+
+watchdog:
+  mode: "off"
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+  nosync: false

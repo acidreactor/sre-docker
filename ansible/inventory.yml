@@ -1,0 +1,31 @@
+
+all:
+  children:
+    pve:
+      hosts:
+        pve1:
+          ansible_host: 192.168.1.10
+          ansible_user: root
+
+    docker_hosts:
+      hosts:
+        sre-host:
+          ansible_host: 192.168.1.60
+          ansible_user: alexander
+          ansible_become: true
+          docker_registry_mirror: ""
+          stack_dir: /opt/sre-stack
+
+  vars:
+    template_id: 9000
+    vm_id: 201
+    vm_name: sre-host
+    vm_cores: 4
+    vm_memory: 8192
+    vm_disk_gb: 40
+    vm_prefix: 24
+    vm_gateway: 192.168.1.1
+    vm_dns: "77.88.8.8 1.1.1.1"
+    pve_storage: local-lvm
+    pve_bridge: vmbr0
+    ssh_pubkey_file: ~/.ssh/id_ed25519.pub

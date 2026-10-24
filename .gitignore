@@ -1,0 +1,6 @@
+.env
+ansible/credentials/
+__pycache__/
+*.retry
+.DS_Store
+ansible/group_vars/docker_hosts/vault.yml

@@ -1,0 +1,82 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    env: lab
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+# Метка instance — имя контейнера, а не host:port: алерты читаются по-человечески
+scrape_configs:
+  # --- сам стек мониторинга ---
+  - job_name: prometheus
+    static_configs: [{ targets: ["localhost:9090"], labels: { instance: prometheus } }]
+  - job_name: alertmanager
+    static_configs: [{ targets: ["alertmanager:9093"], labels: { instance: alertmanager } }]
+  - job_name: loki
+    static_configs: [{ targets: ["loki:3100"], labels: { instance: loki } }]
+  - job_name: grafana
+    static_configs: [{ targets: ["grafana:3000"], labels: { instance: grafana } }]
+  - job_name: alloy
+    static_configs: [{ targets: ["alloy:12345"], labels: { instance: alloy } }]
+
+  # --- ВМ и контейнеры ---
+  - job_name: node
+    static_configs: [{ targets: ["node-exporter:9100"], labels: { instance: sre-host } }]
+  - job_name: cadvisor
+    static_configs: [{ targets: ["cadvisor:8080"], labels: { instance: cadvisor } }]
+
+  # --- PostgreSQL / Patroni ---
+  - job_name: postgres
+    static_configs:
+      - { targets: ["pgexp1:9187"], labels: { instance: pg1 } }
+      - { targets: ["pgexp2:9187"], labels: { instance: pg2 } }
+      - { targets: ["pgexp3:9187"], labels: { instance: pg3 } }
+  - job_name: patroni
+    static_configs:
+      - { targets: ["pg1:8008"], labels: { instance: pg1 } }
+      - { targets: ["pg2:8008"], labels: { instance: pg2 } }
+      - { targets: ["pg3:8008"], labels: { instance: pg3 } }
+
+  # --- Consul (встроенные метрики агента) ---
+  - job_name: consul
+    metrics_path: /v1/agent/metrics
+    params:
+      format: [prometheus]
+    static_configs:
+      - { targets: ["consul1:8500"], labels: { instance: consul1 } }
+      - { targets: ["consul2:8500"], labels: { instance: consul2 } }
+      - { targets: ["consul3:8500"], labels: { instance: consul3 } }
+      - { targets: ["consul-app:8500"], labels: { instance: consul-app } }
+
+  # --- приложение ---
+  - job_name: pgbouncer
+    static_configs: [{ targets: ["pgbouncer-exporter:9127"], labels: { instance: pgbouncer } }]
+  - job_name: nginx
+    static_configs: [{ targets: ["nginx-exporter:9113"], labels: { instance: nginx } }]
+  - job_name: phpfpm
+    static_configs: [{ targets: ["phpfpm-exporter:9253"], labels: { instance: wordpress } }]
+
+  # --- black-box: сайт глазами пользователя ---
+  - job_name: blackbox_http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - "http://nginx/"
+          - "http://nginx/wp-login.php"
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115

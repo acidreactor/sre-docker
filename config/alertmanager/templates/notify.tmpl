@@ -1,0 +1,39 @@
+{{/* Шаблоны уведомлений Alertmanager */}}
+
+{{/* ---------- Telegram (parse_mode: HTML) ---------- */}}
+{{ define "telegram.message" -}}
+{{ if eq .Status "firing" }}🔥{{ else }}✅{{ end }} <b>{{ .CommonLabels.alertname }}</b>{{ if eq .Status "resolved" }} — решено{{ end }}
+{{ range .Alerts -}}
+{{ if eq .Labels.severity "critical" }}🟥{{ else }}🟧{{ end }} <b>{{ .Labels.severity | toUpper }}</b>{{ with .Labels.instance }} · {{ . | html }}{{ end }}
+{{ .Annotations.summary | html }}
+{{ with .Annotations.description }}<i>{{ . | html }}</i>
+{{ end -}}
+<code>{{ .StartsAt.Format "02.01 15:04:05 MST" }}</code>{{ if eq .Status "resolved" }} → <code>{{ .EndsAt.Format "15:04:05 MST" }}</code>{{ end }}
+
+{{ end -}}
+{{- end }}
+
+{{/* ---------- Почта ---------- */}}
+{{ define "email.subject" -}}
+[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}{{ with .CommonLabels.instance }} ({{ . }}){{ end }}
+{{- end }}
+
+{{ define "email.html" -}}
+<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #1a1a1a;">
+<h2 style="margin: 0 0 12px 0; color: {{ if eq .Status "firing" }}#c0392b{{ else }}#27ae60{{ end }};">
+  {{ if eq .Status "firing" }}Сработал алерт{{ else }}Алерт решён{{ end }}: {{ .CommonLabels.alertname }}
+</h2>
+<table cellpadding="6" cellspacing="0" style="border-collapse: collapse; border: 1px solid #ddd;">
+  <tr style="background: #f4f4f4;"><th align="left">Severity</th><th align="left">Объект</th><th align="left">Описание</th><th align="left">Начало</th></tr>
+  {{ range .Alerts }}
+  <tr>
+    <td style="border-top: 1px solid #ddd;"><b>{{ .Labels.severity }}</b></td>
+    <td style="border-top: 1px solid #ddd;">{{ .Labels.instance }}</td>
+    <td style="border-top: 1px solid #ddd;">{{ .Annotations.summary }}<br><span style="color: #666;">{{ .Annotations.description }}</span></td>
+    <td style="border-top: 1px solid #ddd;">{{ .StartsAt.Format "02.01.2006 15:04:05 MST" }}</td>
+  </tr>
+  {{ end }}
+</table>
+<p style="color: #888;">Alertmanager: <a href="{{ .ExternalURL }}">{{ .ExternalURL }}</a></p>
+</body></html>
+{{- end }}

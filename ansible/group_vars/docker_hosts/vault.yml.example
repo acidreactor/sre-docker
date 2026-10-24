@@ -1,0 +1,7 @@
+# Скопировать в vault.yml, заполнить и зашифровать:
+#   cp vault.yml.example vault.yml
+#   ansible-vault encrypt vault.yml
+# Запуск плейбука после этого: ansible-playbook site.yml --ask-vault-pass
+vault_telegram_bot_token: "123456789:AA..."
+vault_telegram_chat_id: "123456789"
+vault_smtp_password: "пароль-приложения"

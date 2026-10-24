@@ -1,0 +1,137 @@
+groups:
+  # ------------------------------------------------------------- Patroni
+  - name: patroni
+    rules:
+      - alert: PatroniNoLeader
+        expr: sum by (scope) (patroni_primary) == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "В кластере {{ $labels.scope }} нет лидера"
+          description: "Запись в БД невозможна. patronictl -c /etc/patroni/config.yml list"
+
+      - alert: PatroniSplitBrain
+        expr: sum by (scope) (patroni_primary) > 1
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: "В кластере {{ $labels.scope }} больше одного primary"
+          description: "Два узла считают себя лидером. Немедленно проверьте DCS (Consul) и сеть."
+
+      - alert: PatroniFailoverHappened
+        expr: changes(max by (scope) (patroni_postgres_timeline)[15m:30s]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "В кластере {{ $labels.scope }} сменился лидер"
+          description: "Timeline изменился за последние 15 минут — был failover или switchover. Разберите причину."
+
+      - alert: PatroniPostgresNotRunning
+        expr: patroni_postgres_running == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "PostgreSQL не запущен на {{ $labels.instance }}"
+          description: "Patroni жив, но экземпляр PostgreSQL остановлен."
+
+      - alert: PatroniReplicaCountLow
+        expr: sum by (scope) (patroni_replica) < 2
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Мало реплик в {{ $labels.scope }}: {{ $value }}"
+          description: "Кластер работает с пониженной отказоустойчивостью."
+
+      - alert: PatroniReplicationLagHigh
+        expr: |
+          (
+            (max by (scope) (patroni_xlog_location)
+              - on (scope) group_right patroni_xlog_replayed_location)
+            and on (instance) (patroni_replica == 1)
+          ) > 50 * 1024 * 1024
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Реплика {{ $labels.instance }} отстаёт на {{ $value | humanize1024 }}B"
+          description: "При отставании больше maximum_lag_on_failover (1 МБ) реплика не станет лидером."
+
+  # ---------------------------------------------------------- PostgreSQL
+  - name: postgres
+    rules:
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "postgres_exporter не может подключиться к PostgreSQL на {{ $labels.instance }}"
+          description: "Проверьте patroni.service и логи /var/log/postgresql."
+
+      - alert: PostgresTooManyConnections
+        expr: |
+          sum by (instance) (pg_stat_database_numbackends)
+            / on (instance) max by (instance) (pg_settings_max_connections) > 0.8
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Соединений на {{ $labels.instance }} > 80% от max_connections"
+          description: "Проверьте пулы pgbouncer и утечки соединений."
+
+      - alert: PostgresDeadlocks
+        expr: increase(pg_stat_database_deadlocks{datname!~"template.*"}[5m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Дедлоки в БД {{ $labels.datname }} на {{ $labels.instance }}"
+          description: "За 5 минут: {{ $value }}."
+
+  # ----------------------------------------------------------- pgbouncer
+  - name: pgbouncer
+    rules:
+      - alert: PgbouncerDown
+        expr: pgbouncer_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "pgbouncer на {{ $labels.instance }} недоступен"
+          description: "WordPress не может подключиться к БД."
+
+      - alert: PgbouncerClientsWaiting
+        expr: sum by (instance, database) (pgbouncer_pools_client_waiting_connections) > 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Клиенты ждут соединения в pgbouncer ({{ $labels.database }})"
+          description: "Пул исчерпан: {{ $value }} ожидающих. Увеличьте default_pool_size или ищите долгие запросы."
+
+      - alert: PgbouncerMaxWaitHigh
+        expr: max by (instance, database) (pgbouncer_pools_client_maxwait_seconds) > 1
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Ожидание соединения в pgbouncer > 1 с"
+          description: "Пользователь видит задержку из-за нехватки серверных соединений."
+
+  # -------------------------------------------------------------- Consul
+  - name: consul
+    rules:
+      - alert: ConsulNoLeader
+        expr: absent(consul_autopilot_healthy)
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "У Consul нет лидера"
+          description: "Метрики autopilot публикует только лидер Raft. Без DCS Patroni переведёт primary в read-only."
+
+      - alert: ConsulClusterUnhealthy
+        expr: max(consul_autopilot_healthy) == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Autopilot считает кластер Consul нездоровым"
+          description: "consul operator raft list-peers; consul members"
+
+      - alert: ConsulNoFailureTolerance
+        expr: max(consul_autopilot_failure_tolerance) < 1
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Consul не переживёт потерю ещё одного сервера"
+          description: "Отказоустойчивость кворума = {{ $value }}."

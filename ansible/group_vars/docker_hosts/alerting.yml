@@ -1,0 +1,18 @@
+# Каналы уведомлений Alertmanager.
+# Пустое значение = канал выключен. Секреты — в vault.yml (см. vault.yml.example).
+
+# --- Telegram: токен от @BotFather, chat_id из https://api.telegram.org/bot<токен>/getUpdates
+alert_telegram_bot_token: "{{ vault_telegram_bot_token | default('') }}"
+alert_telegram_chat_id: "{{ vault_telegram_chat_id | default('') }}"
+
+# --- Почта (только critical). Для Яндекса/Gmail нужен пароль приложения
+alert_email_to: ""                          # куда слать
+alert_smtp_smarthost: "smtp.yandex.ru:587"  # хост:порт SMTP (587 — STARTTLS)
+alert_smtp_from: ""                         # обычно совпадает с логином
+alert_smtp_username: ""
+alert_smtp_password: "{{ vault_smtp_password | default('') }}"
+alert_smtp_require_tls: true
+
+# --- Webhook: по умолчанию встроенный приёмник webhook-logger (пишет уведомления в Loki).
+# Можно указать внешний адрес, например https://webhook.site/<uuid>
+alert_webhook_url: "http://webhook-logger:9000/alerts"

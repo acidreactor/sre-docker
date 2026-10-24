@@ -1,0 +1,5 @@
+---
+# Всё одной командой: ВМ на Proxmox → Docker → стек
+#   ansible-playbook site.yml
+- import_playbook: provision-pve.yml
+- import_playbook: deploy.yml

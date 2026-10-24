@@ -1,0 +1,193 @@
+---
+# Разворачивает весь стенд на одной ВМ Ubuntu 22.04:
+#   cd ansible && ansible-playbook deploy.yml
+# Повторный запуск безопасен: пароли хранятся в ansible/credentials/ и не меняются.
+
+- name: Секреты (генерируются один раз на управляющей машине)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Каталог credentials
+      ansible.builtin.file: { path: "{{ playbook_dir }}/credentials", state: directory, mode: "0700" }
+    - name: Gossip-ключ Consul (32 байта base64)
+      ansible.builtin.shell: head -c 32 /dev/urandom | base64 > {{ playbook_dir }}/credentials/consul_gossip_key
+      args: { creates: "{{ playbook_dir }}/credentials/consul_gossip_key" }
+
+- name: Docker-хост и стек
+  hosts: docker_hosts
+  vars:
+    cred: "{{ playbook_dir }}/credentials"
+    pw: "chars=ascii_letters,digits length=24"
+  tasks:
+    # ---------- ОС ----------
+    - name: Дождаться окончания cloud-init (иначе apt будет занят)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    - name: Базовые пакеты
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg, jq, apache2-utils]
+        update_cache: true
+        cache_valid_time: 3600
+
+    # Docker Engine и compose plugin из официального репозитория download.docker.com
+    - name: Docker из официального репозитория
+      block:
+        - name: Архитектура для apt
+          ansible.builtin.command: dpkg --print-architecture
+          register: dpkg_arch
+          changed_when: false
+
+        - name: Каталог ключей
+          ansible.builtin.file: { path: /etc/apt/keyrings, state: directory, mode: "0755" }
+
+        - name: Ключ репозитория Docker
+          ansible.builtin.get_url:
+            url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+            dest: /etc/apt/keyrings/docker.asc
+            mode: "0644"
+
+        - name: Репозиторий Docker
+          ansible.builtin.copy:
+            dest: /etc/apt/sources.list.d/docker.list
+            mode: "0644"
+            content: >
+              deb [arch={{ dpkg_arch.stdout }} signed-by=/etc/apt/keyrings/docker.asc]
+              https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable
+
+        - name: docker-ce + compose plugin
+          ansible.builtin.apt:
+            name: [docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin]
+            update_cache: true
+
+    - name: Пользователь {{ ansible_user }} в группе docker (docker без sudo)
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Каталог drop-in для docker.service
+      ansible.builtin.file: { path: /etc/systemd/system/docker.service.d, state: directory, mode: "0755" }
+
+    - name: daemon.json (зеркало Docker Hub, ротация логов)
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: "{{ cfg | to_nice_json }}\n"
+      vars:
+        # containerd-snapshotter выключен: cAdvisor читает слои контейнеров из /var/lib/docker (overlay2)
+        cfg: "{{ {'log-driver': 'json-file', 'log-opts': {'max-size': '20m', 'max-file': '3'},
+                  'features': {'containerd-snapshotter': false}}
+                 | combine({'registry-mirrors': [docker_registry_mirror]} if docker_registry_mirror else {}) }}"
+      register: docker_daemon
+
+    - name: Docker запущен (перезапуск при смене настроек)
+      ansible.builtin.systemd:
+        name: docker
+        state: "{{ 'restarted' if docker_daemon.changed else 'started' }}"
+        enabled: true
+        daemon_reload: true
+
+    # ---------- Стек ----------
+    - name: Скопировать стек на ВМ
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../{{ item }}"
+        dest: "{{ stack_dir }}/"
+        mode: preserve
+      loop: [docker-compose.yml, images, config]
+
+    - name: Alertmanager — каналы уведомлений (Telegram, почта, webhook)
+      ansible.builtin.template:
+        src: templates/alertmanager.yml.j2
+        dest: "{{ stack_dir }}/config/alertmanager/alertmanager.yml"
+        owner: "65534"        # контейнер alertmanager работает от nobody
+        mode: "0600"          # внутри токены и пароли
+      no_log: true
+      register: am_cfg
+
+    - name: .env с паролями
+      ansible.builtin.copy:
+        dest: "{{ stack_dir }}/.env"
+        mode: "0600"
+        content: |
+          HTTP_PORT=80
+          CONSUL_GOSSIP_KEY={{ lookup('file', cred ~ '/consul_gossip_key') }}
+          PG_SUPERUSER_PASSWORD={{ lookup('password', cred ~ '/pg_superuser ' ~ pw) }}
+          PG_REPLICATION_PASSWORD={{ lookup('password', cred ~ '/pg_replication ' ~ pw) }}
+          PG_REWIND_PASSWORD={{ lookup('password', cred ~ '/pg_rewind ' ~ pw) }}
+          PATRONI_API_PASSWORD={{ lookup('password', cred ~ '/patroni_api ' ~ pw) }}
+          PG_EXPORTER_PASSWORD={{ lookup('password', cred ~ '/pg_exporter ' ~ pw) }}
+          WP_DB_PASSWORD={{ lookup('password', cred ~ '/wp_db ' ~ pw) }}
+          PGBOUNCER_STATS_PASSWORD={{ lookup('password', cred ~ '/pgbouncer_stats ' ~ pw) }}
+          GRAFANA_ADMIN_PASSWORD={{ lookup('password', cred ~ '/grafana_admin ' ~ pw) }}
+      no_log: true
+
+    - name: Скачать образы
+      ansible.builtin.command: docker compose pull --ignore-buildable --quiet
+      args: { chdir: "{{ stack_dir }}" }
+      changed_when: false
+
+    - name: Собрать свои образы (patroni, pgbouncer, wordpress) — несколько минут
+      ansible.builtin.command: docker compose build
+      args: { chdir: "{{ stack_dir }}" }
+      changed_when: false
+
+    - name: Поднять стек
+      ansible.builtin.command: docker compose up -d --remove-orphans
+      args: { chdir: "{{ stack_dir }}" }
+      register: up
+      changed_when: "'Started' in up.stderr or 'Recreated' in up.stderr"
+
+    - name: Перечитать конфиг Alertmanager, если он изменился
+      ansible.builtin.command: docker compose restart alertmanager
+      args: { chdir: "{{ stack_dir }}" }
+      when: am_cfg.changed
+
+    # ---------- Проверки ----------
+    - name: Проверить конфиг Alertmanager (amtool)
+      ansible.builtin.command: docker compose exec -T alertmanager amtool check-config /etc/alertmanager/alertmanager.yml
+      args: { chdir: "{{ stack_dir }}" }
+      register: amtool
+      retries: 5
+      delay: 3
+      until: amtool.rc == 0
+      changed_when: false
+
+    - name: Включённые каналы уведомлений
+      ansible.builtin.debug:
+        msg: >-
+          Telegram: {{ 'да' if (alert_telegram_bot_token and alert_telegram_chat_id) else 'нет' }},
+          почта: {{ 'да → ' ~ alert_email_to if alert_email_to else 'нет' }},
+          webhook: {{ alert_webhook_url if alert_webhook_url else 'нет' }}
+
+    - name: Дождаться лидера Patroni
+      ansible.builtin.command: docker compose exec -T pg1 patronictl -c /etc/patroni.yml list -f json
+      args: { chdir: "{{ stack_dir }}" }
+      register: plist
+      until: plist.rc == 0 and (plist.stdout | from_json | selectattr('Role', 'equalto', 'Leader') | list | length) == 1
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Дождаться мониторинга
+      ansible.builtin.uri:
+        url: "{{ item }}"
+      register: ready
+      until: ready.status == 200
+      retries: 30
+      delay: 5
+      loop:
+        - http://127.0.0.1:9090/-/ready
+        - http://127.0.0.1:9093/-/ready
+        - http://127.0.0.1:3000/api/health
+
+    - name: Итог
+      ansible.builtin.debug:
+        msg:
+          - "Кластер: {{ plist.stdout | from_json | map(attribute='Member') | zip(plist.stdout | from_json | map(attribute='Role')) | map('join', '=') | join(', ') }}"
+          - "Сайт:       http://{{ ansible_host }}/"
+          - "Grafana:    http://{{ ansible_host }}:3000  (admin / ansible/credentials/grafana_admin)"
+          - "Prometheus: http://{{ ansible_host }}:9090   Alertmanager: :9093   Consul UI: :8500"

@@ -1,0 +1,59 @@
+// Сбор логов всех контейнеров стенда через Docker API → Loki.
+// Метки: service (имя сервиса compose), container, env; для PostgreSQL/Patroni — level.
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "containers" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  labels        = { env = "lab" }
+  relabel_rules = discovery.relabel.containers.rules
+  forward_to    = [loki.process.containers.receiver]
+}
+
+loki.process "containers" {
+  // PostgreSQL и Patroni: многострочные записи склеиваем по метке времени,
+  // уровень (LOG/INFO/WARNING/ERROR/FATAL/PANIC) выносим в метку level
+  stage.match {
+    selector = "{service=~\"pg[0-9]\"}"
+
+    stage.multiline {
+      firstline     = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"
+      max_wait_time = "3s"
+    }
+    stage.regex {
+      expression = "(?P<level>DEBUG\\d?|LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|CRITICAL):"
+    }
+    stage.labels {
+      values = { level = "" }
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

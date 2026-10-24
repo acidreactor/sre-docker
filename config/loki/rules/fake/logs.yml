@@ -1,0 +1,36 @@
+groups:
+  - name: logs
+    rules:
+      - alert: Nginx5xxRateHigh
+        expr: |
+          sum(rate({service="nginx"} | json status="status" | __error__="" | status >= 500 [5m]))
+            /
+          sum(rate({service="nginx"} | json status="status" | __error__="" [5m]))
+            > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Больше 5% ответов 5xx"
+          description: "Доля ошибок {{ $value | humanizePercentage }}. Explore: {service=\"nginx\"} | json | status >= 500"
+
+      - alert: PostgresFatalErrors
+        expr: sum by (container) (count_over_time({service=~"pg[0-9]", level=~"FATAL|PANIC"} [5m])) > 5
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "FATAL/PANIC в логе PostgreSQL на {{ $labels.container }}"
+          description: "{{ $value }} записей за 5 минут."
+
+      - alert: PhpFatalErrors
+        expr: sum (count_over_time({service="wordpress"} |= "PHP Fatal error" [5m])) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "PHP Fatal error в WordPress"
+          description: "{{ $value }} за 5 минут. Explore: {service=\"wordpress\"} |= \"PHP Fatal error\""
+
+      - alert: PgbouncerServerLoginFailed
+        expr: sum (count_over_time({service="pgbouncer"} |~ "(?i)(login failed|server login|could not connect)" [5m])) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "pgbouncer не может подключиться к PostgreSQL"
+          description: "Проверьте databases.ini (docker exec pgbouncer cat /etc/pgbouncer/databases.ini) и доступность лидера."

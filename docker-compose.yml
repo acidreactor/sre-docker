@@ -1,0 +1,300 @@
+# SRE-стенд: WordPress на HA PostgreSQL (Patroni + Consul) + Prometheus / Loki / Grafana.
+# Разворачивается Ansible: ansible/site.yml (пароли в .env пишет deploy.yml)
+name: sre
+
+x-common: &common
+  restart: unless-stopped
+  networks: [sre]
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "3" }
+
+x-consul-server: &consul-server
+  <<: *common
+  image: hashicorp/consul:1.21
+
+x-patroni: &patroni
+  <<: *common
+  build:
+    context: ./images/patroni
+  image: sre/patroni:15
+  depends_on: [consul1, consul2, consul3]
+  stop_grace_period: 30s
+  shm_size: 128m
+
+x-patroni-env: &patroni-env
+  PATRONI_SUPERUSER_PASSWORD: ${PG_SUPERUSER_PASSWORD}
+  PATRONI_REPLICATION_PASSWORD: ${PG_REPLICATION_PASSWORD}
+  PATRONI_REWIND_PASSWORD: ${PG_REWIND_PASSWORD}
+  PATRONI_RESTAPI_USERNAME: patroni
+  PATRONI_RESTAPI_PASSWORD: ${PATRONI_API_PASSWORD}
+  WP_DB_PASSWORD: ${WP_DB_PASSWORD}
+  PG_EXPORTER_PASSWORD: ${PG_EXPORTER_PASSWORD}
+
+x-pgexp: &pgexp
+  <<: *common
+  image: prometheuscommunity/postgres-exporter:v0.17.1
+  command: ["--collector.stat_statements"]
+
+# Метрики Consul в формате Prometheus (/v1/agent/metrics?format=prometheus)
+x-consul-hcl1: &hcl1 '-hcl=telemetry { prometheus_retention_time = "60s" }'
+x-consul-hcl2: &hcl2 '-hcl=telemetry { disable_hostname = true }'
+
+networks:
+  sre:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  consul1_data: {}
+  consul2_data: {}
+  consul3_data: {}
+  pg1_data: {}
+  pg2_data: {}
+  pg3_data: {}
+  wp_data: {}
+  prometheus_data: {}
+  alertmanager_data: {}
+  loki_data: {}
+  grafana_data: {}
+  alloy_data: {}
+
+services:
+  consul1:
+    <<: *consul-server
+    hostname: consul1
+    command: [agent, -server, -bootstrap-expect=3, -node=consul1, -client=0.0.0.0, -ui,
+              -retry-join=consul1, -retry-join=consul2, -retry-join=consul3,
+              "-encrypt=${CONSUL_GOSSIP_KEY}", *hcl1, *hcl2]
+    volumes: [consul1_data:/consul/data]
+    ports: ["8500:8500"]
+  consul2:
+    <<: *consul-server
+    hostname: consul2
+    command: [agent, -server, -bootstrap-expect=3, -node=consul2, -client=0.0.0.0, -ui,
+              -retry-join=consul1, -retry-join=consul2, -retry-join=consul3,
+              "-encrypt=${CONSUL_GOSSIP_KEY}", *hcl1, *hcl2]
+    volumes: [consul2_data:/consul/data]
+  consul3:
+    <<: *consul-server
+    hostname: consul3
+    command: [agent, -server, -bootstrap-expect=3, -node=consul3, -client=0.0.0.0, -ui,
+              -retry-join=consul1, -retry-join=consul2, -retry-join=consul3,
+              "-encrypt=${CONSUL_GOSSIP_KEY}", *hcl1, *hcl2]
+    volumes: [consul3_data:/consul/data]
+  # Клиентский агент стороны приложения — к нему ходит consul-template
+  consul-app:
+    <<: *consul-server
+    hostname: consul-app
+    command: [agent, -node=consul-app, -client=0.0.0.0,
+              -retry-join=consul1, -retry-join=consul2, -retry-join=consul3,
+              "-encrypt=${CONSUL_GOSSIP_KEY}", *hcl1, *hcl2]
+    depends_on: [consul1, consul2, consul3]
+
+  pg1:
+    <<: *patroni
+    hostname: pg1
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: pg1
+      PATRONI_CONSUL_HOST: consul1:8500
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg1:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg1:5432
+    volumes: [pg1_data:/var/lib/postgresql/data]
+  pg2:
+    <<: *patroni
+    hostname: pg2
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: pg2
+      PATRONI_CONSUL_HOST: consul2:8500
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg2:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg2:5432
+    volumes: [pg2_data:/var/lib/postgresql/data]
+  pg3:
+    <<: *patroni
+    hostname: pg3
+    environment:
+      <<: *patroni-env
+      PATRONI_NAME: pg3
+      PATRONI_CONSUL_HOST: consul3:8500
+      PATRONI_RESTAPI_CONNECT_ADDRESS: pg3:8008
+      PATRONI_POSTGRESQL_CONNECT_ADDRESS: pg3:5432
+    volumes: [pg3_data:/var/lib/postgresql/data]
+
+  pgbouncer:
+    <<: *common
+    build:
+      context: ./images/pgbouncer
+    image: sre/pgbouncer:ct
+    hostname: pgbouncer
+    environment:
+      WP_DB_PASSWORD: ${WP_DB_PASSWORD}
+      PGBOUNCER_STATS_PASSWORD: ${PGBOUNCER_STATS_PASSWORD}
+    depends_on: [consul-app]
+
+  wordpress:
+    <<: *common
+    build:
+      context: ./images/wordpress
+    image: sre/wordpress:6.5
+    hostname: wordpress
+    environment:
+      WORDPRESS_DB_HOST: pgbouncer
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${WP_DB_PASSWORD}
+      WORDPRESS_CONFIG_EXTRA: |
+        if (isset($$_SERVER['HTTP_HOST'])) {
+          define('WP_HOME', 'http://' . $$_SERVER['HTTP_HOST']);
+          define('WP_SITEURL', 'http://' . $$_SERVER['HTTP_HOST']);
+        }
+        define('DISALLOW_FILE_EDIT', true);
+    volumes: [wp_data:/var/www/html]
+    depends_on: [pgbouncer]
+
+  nginx:
+    <<: *common
+    image: nginx:1.27
+    hostname: nginx
+    volumes:
+      - wp_data:/var/www/html:ro
+      - ./config/nginx/00-http.conf:/etc/nginx/conf.d/00-http.conf:ro
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports: ["${HTTP_PORT:-80}:80"]
+    depends_on: [wordpress]
+
+  pgexp1:
+    <<: *pgexp
+    environment:
+      DATA_SOURCE_URI: pg1:5432/postgres?sslmode=disable
+      DATA_SOURCE_USER: postgres_exporter
+      DATA_SOURCE_PASS: ${PG_EXPORTER_PASSWORD}
+  pgexp2:
+    <<: *pgexp
+    environment:
+      DATA_SOURCE_URI: pg2:5432/postgres?sslmode=disable
+      DATA_SOURCE_USER: postgres_exporter
+      DATA_SOURCE_PASS: ${PG_EXPORTER_PASSWORD}
+  pgexp3:
+    <<: *pgexp
+    environment:
+      DATA_SOURCE_URI: pg3:5432/postgres?sslmode=disable
+      DATA_SOURCE_USER: postgres_exporter
+      DATA_SOURCE_PASS: ${PG_EXPORTER_PASSWORD}
+
+  pgbouncer-exporter:
+    <<: *common
+    image: prometheuscommunity/pgbouncer-exporter:v0.10.2
+    command: ["--pgBouncer.connectionString=postgres://pgbouncer_exporter:${PGBOUNCER_STATS_PASSWORD}@pgbouncer:5432/pgbouncer?sslmode=disable"]
+    depends_on: [pgbouncer]
+
+  nginx-exporter:
+    <<: *common
+    image: nginx/nginx-prometheus-exporter:1.4.0
+    command: ["--nginx.scrape-uri=http://nginx:8080/stub_status"]
+    depends_on: [nginx]
+
+  phpfpm-exporter:
+    <<: *common
+    image: hipages/php-fpm_exporter:2.2.0
+    command: ["server", "--phpfpm.scrape-uri", "tcp://wordpress:9000/status"]
+    depends_on: [wordpress]
+
+  node-exporter:
+    <<: *common
+    image: prom/node-exporter:v1.9.1
+    pid: host
+    command: ["--path.rootfs=/host"]
+    volumes: ["/:/host:ro,rslave"]
+
+  cadvisor:
+    <<: *common
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    devices: [/dev/kmsg]
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service
+      - --disable_metrics=percpu,sched,tcp,udp,hugetlb,referenced_memory,cpu_topology,resctrl
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+
+  alloy:
+    <<: *common
+    image: grafana/alloy:v1.10.0
+    command: [run, --server.http.listen-addr=0.0.0.0:12345, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+    volumes:
+      - ./config/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    ports: ["12345:12345"]          # UI Alloy
+    depends_on: [loki]
+
+  prometheus:
+    <<: *common
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./config/prometheus:/etc/prometheus:ro
+      - prometheus_data:/prometheus
+    ports: ["9090:9090"]
+
+  alertmanager:
+    <<: *common
+    image: prom/alertmanager:v0.28.1
+    command: [--config.file=/etc/alertmanager/alertmanager.yml, --storage.path=/alertmanager]
+    volumes:
+      - ./config/alertmanager:/etc/alertmanager:ro
+      - alertmanager_data:/alertmanager
+    ports: ["9093:9093"]
+
+  webhook-logger:
+    <<: *common
+    image: python:3.12-alpine
+    command: ["python", "-u", "/app/server.py"]
+    volumes:
+      - ./config/webhook-logger/server.py:/app/server.py:ro
+
+  loki:
+    <<: *common
+    image: grafana/loki:3.5.0
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./config/loki/loki.yml:/etc/loki/loki.yml:ro
+      - ./config/loki/rules:/etc/loki/rules:ro
+      - loki_data:/loki
+
+  blackbox:
+    <<: *common
+    image: prom/blackbox-exporter:v0.26.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes: [./config/blackbox:/etc/blackbox:ro]
+
+  grafana:
+    <<: *common
+    image: grafana/grafana:12.0.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki]
